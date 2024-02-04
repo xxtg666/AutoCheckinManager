@@ -289,6 +289,7 @@ def delayCommand(delay, command, query_item):
     global global_checkin_query, global_checkin_query_list
     time.sleep(delay)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.wait()
     output, error = process.communicate()
     global_checkin_query[query_item] = output.decode(encoding=("gbk" if (platform.system() == "Windows") else "utf8"))
     global_checkin_query_list.remove(query_item)
