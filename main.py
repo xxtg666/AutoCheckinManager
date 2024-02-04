@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import random
+import platform
 import threading
 import webbrowser
 import subprocess
@@ -287,11 +288,9 @@ global_checkin_query_list = []
 def delayCommand(delay, command, query_item):
     global global_checkin_query, global_checkin_query_list
     time.sleep(delay)
-    output, error = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="gbk").communicate()
-    try:
-        global_checkin_query[query_item] = output.decode()
-    except:
-        global_checkin_query[query_item] = str(output)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, error = process.communicate()
+    global_checkin_query[query_item] = output.decode(encoding=("gbk" if (platform.system() == "Windows") else "utf8"))
     global_checkin_query_list.remove(query_item)
     print("任务 "+query_item+" 执行完成")
 
