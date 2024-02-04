@@ -6,9 +6,14 @@ import random
 import threading
 import webbrowser
 import subprocess
+from resources_acm import *
+from smtplib import SMTP_SSL
 from PySide6.QtCore import *
 from PySide6.QtWidgets import *
+from email.header import Header
 from ui_acm import Ui_MainWindow
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 def generateRandomID(k=8):
     return ''.join(random.sample('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',k))
@@ -263,26 +268,51 @@ class NAME(QMainWindow, Ui_MainWindow):
                         self.pb_save_config.setEnabled(True)
     
     def testCheckin(self):
-        QMessageBox.information(
-            self, 
-            "测试签到数据输出", 
-            checkin(
-                True, 
-                self.cb_skip_wait.isChecked(), 
-                self.cb_only_choose_service.isChecked(), 
-                self.cb_only_choose_user.isChecked(), 
-                self.cb_send_email_notice.isChecked()
-            )
-        )
+        # QMessageBox.information(
+        #     self, 
+        #     "测试签到数据输出", 
+        #     checkin(
+        #         True, 
+        #         self.cb_skip_wait.isChecked(), 
+        #         self.cb_only_choose_service.isChecked(), 
+        #         self.cb_only_choose_user.isChecked(), 
+        #         self.cb_send_email_notice.isChecked()
+        #     )
+        # )
+        QMessageBox.information(self, "提示", "测试签到暂未实现")
 
 global_checkin_query = {}
 global_checkin_query_list = []
+
+def delayCommand(delay, command, query_item):
+    global global_checkin_query, global_checkin_query_list
+    time.sleep(delay)
+    output, error = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="gbk").communicate()
+    try:
+        global_checkin_query[query_item] = output.decode()
+    except:
+        global_checkin_query[query_item] = str(output)
+    global_checkin_query_list.remove(query_item)
+    print("任务 "+query_item+" 执行完成")
+
+def sendMail(receiver, subject, body):
+    config = json.load(open("config.json"))
+    msg = MIMEMultipart()
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = config["email_account"]
+    msg['To'] = ";".join(receiver)
+    msg.attach(MIMEText(body,'html','utf-8'))
+    smtp = SMTP_SSL(config["email_server"])
+    smtp.login(config["email_account"],config["email_password"])
+    smtp.sendmail(config["email_account"],receiver,msg.as_string())
+    smtp.quit()
+
 def checkin(test_mode = False, skip_wait_time = False, only_service = False, only_user = False, email_notice = True):
     global global_checkin_query, global_checkin_query_list
     if not test_mode:
+        config = json.load(open("config.json"))
         results = {}
         delays = []
-        json.dump(time.time(), open("last_checkin_time.json", "w"))
         for ukey in (users := json.load(open("users.json"))):
             user_config = json.load(open(f"users/{ukey}.json"))
             results[ukey] = {}
@@ -295,21 +325,30 @@ def checkin(test_mode = False, skip_wait_time = False, only_service = False, onl
                 command = service["command"].replace("{config}",user_config["config"].get(service["key"],""))
                 qi = generateRandomID()
                 results[ukey][skey] = qi
+                global_checkin_query_list.append(qi)
                 threading.Thread(target=lambda: delayCommand(delay, command, qi)).start()
         time.sleep(max(delays))
         while global_checkin_query_list != []:
             time.sleep(10)
-        for ukey in results:
-            for skey in results[ukey]:
-                results[ukey][skey] = global_checkin_query[results[ukey][skey]]
-        #TODO:邮件发送格式;测试模式;直接调用签到
-
-def delayCommand(delay, command, query_item):
-    global global_checkin_query, global_checkin_query_list
-    time.sleep(delay)
-    output, error = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
-    global_checkin_query[query_item] = output.decode()
-    global_checkin_query_list.remove(query_item)
+        json.dump(t := time.time(), open("last_checkin_time.json", "w"))
+        if config["email_notice_type"] == "all":
+            mail_body = ""
+            for ukey in results:
+                mail_body += genMailUser(users[ukey]['name'])
+                for skey in results[ukey]:
+                    output = global_checkin_query[results[ukey][skey]]
+                    mail_body += genMailService(services[skey]["name"], output)
+            mail_body = genMailBody(d := time.strftime("%Y-%m-%d", time.localtime(t)), mail_body)
+            sendMail([users[ukey]["email"] for ukey in users], "自动签到通知 "+d, mail_body)
+        if config["email_notice_type"] == "div":
+            for ukey in results:
+                mail_body = genMailUser(users[ukey]['name'])
+                for skey in results[ukey]:
+                    output = global_checkin_query[results[ukey][skey]]
+                    mail_body += genMailService(services[skey]["name"], output)
+                mail_body = genMailBody(d := time.strftime("%Y-%m-%d", time.localtime(t)), mail_body)
+                sendMail([users[ukey]["email"]], "自动签到通知 "+d, mail_body)
+        #TODO:测试模式
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
