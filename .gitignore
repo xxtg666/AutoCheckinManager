@@ -4,3 +4,4 @@ config.json
 last_checkin_time.json
 services.json
 users.json
+data.json
