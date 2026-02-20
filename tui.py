@@ -376,6 +376,54 @@ class EmailTab(TabPane):
         self.app.notify("配置保存成功")
 
 
+class TelegramTab(TabPane):
+    def compose(self) -> ComposeResult:
+        with VerticalScroll():
+            yield Label("Telegram 配置", classes="panel-title")
+            yield Checkbox("启用 Telegram 通知", id="tg-enabled")
+            yield Label("Bot Token")
+            yield Input(id="tg-bot-token", placeholder="从 @BotFather 获取")
+            yield Label("Chat ID")
+            yield Input(id="tg-chat-id", placeholder="目标聊天/群组 ID")
+            yield Label("代理地址")
+            yield Input(id="tg-proxy", placeholder="例如 http://127.0.0.1:7890（留空不使用）")
+            yield Static("提示：仅支持「一起通知」模式，所有用户的签到结果\n合并为一条消息发送到指定聊天。", classes="tg-hint")
+            with Horizontal(classes="button-row"):
+                yield Button("保存配置", id="btn-save-telegram", variant="success")
+                yield Button("发送测试", id="btn-test-telegram", variant="primary")
+
+    def on_mount(self) -> None:
+        config = core.loadConfig()
+        self.query_one("#tg-enabled", Checkbox).value = config.get("telegram_enabled", False)
+        self.query_one("#tg-bot-token", Input).value = config.get("telegram_bot_token", "")
+        self.query_one("#tg-chat-id", Input).value = config.get("telegram_chat_id", "")
+        self.query_one("#tg-proxy", Input).value = config.get("telegram_proxy", "")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-save-telegram":
+            self._save_config()
+        elif event.button.id == "btn-test-telegram":
+            self._test_send()
+
+    def _save_config(self) -> None:
+        config = {
+            "telegram_enabled": self.query_one("#tg-enabled", Checkbox).value,
+            "telegram_bot_token": self.query_one("#tg-bot-token", Input).value,
+            "telegram_chat_id": self.query_one("#tg-chat-id", Input).value,
+            "telegram_proxy": self.query_one("#tg-proxy", Input).value,
+        }
+        core.saveConfig(config)
+        self.app.notify("Telegram 配置保存成功")
+
+    def _test_send(self) -> None:
+        self._save_config()
+        try:
+            core.sendTelegram("✅ <b>AutoCheckinManager</b>\n\nTelegram 通知功能测试成功！")
+            self.app.notify("测试消息发送成功")
+        except Exception as e:
+            self.app.notify(f"发送失败: {e}", severity="error")
+
+
 class CheckinTab(TabPane):
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -383,6 +431,7 @@ class CheckinTab(TabPane):
             with Horizontal(classes="option-row"):
                 yield Checkbox("跳过随机等待", id="opt-skip-wait", value=True)
                 yield Checkbox("发送邮件通知", id="opt-email-notice")
+                yield Checkbox("发送Telegram通知", id="opt-tg-notice")
             yield Label("仅执行指定服务（留空=全部）")
             yield Input(id="opt-only-service", placeholder="服务ID（留空执行全部）")
             yield Label("仅执行指定用户（留空=全部）")
@@ -415,6 +464,7 @@ class CheckinTab(TabPane):
 
         skip_wait = self.query_one("#opt-skip-wait", Checkbox).value
         email_notice = self.query_one("#opt-email-notice", Checkbox).value
+        telegram_notice = self.query_one("#opt-tg-notice", Checkbox).value
         only_service = self.query_one("#opt-only-service", Input).value.strip() or None
         only_user = self.query_one("#opt-only-user", Input).value.strip() or None
 
@@ -428,6 +478,7 @@ class CheckinTab(TabPane):
                     only_service=only_service,
                     only_user=only_user,
                     email_notice=email_notice,
+                    telegram_notice=telegram_notice,
                     log_callback=log_callback,
                 )
             except Exception as e:
@@ -486,6 +537,10 @@ class ACMApp(App):
         border: solid $accent;
         margin-top: 1;
     }
+    .tg-hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
     ListView {
         height: 1fr;
     }
@@ -504,6 +559,8 @@ class ACMApp(App):
             with UserTab("用户管理"):
                 pass
             with EmailTab("邮件配置"):
+                pass
+            with TelegramTab("Telegram"):
                 pass
             with CheckinTab("执行签到"):
                 pass

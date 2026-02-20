@@ -6,11 +6,13 @@ import shutil
 import platform
 import threading
 import subprocess
+import urllib.request
 from smtplib import SMTP_SSL
 from email.header import Header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from resources_acm import genMailBody, genMailUser, genMailService
+from resources_acm import genTelegramMessage, genTelegramUser, genTelegramService
 
 DATA_FILE = "data.json"
 
@@ -20,6 +22,10 @@ _EMPTY_DATA = {
         "email_account": "",
         "email_password": "",
         "email_notice_type": "no",
+        "telegram_bot_token": "",
+        "telegram_chat_id": "",
+        "telegram_proxy": "",
+        "telegram_enabled": False,
     },
     "services": {},
     "users": {},
@@ -111,7 +117,7 @@ def loadConfig():
 
 def saveConfig(config):
     data = _loadData()
-    data["config"] = config
+    data["config"].update(config)
     _saveData(data)
 
 
@@ -200,7 +206,29 @@ def sendMail(receiver, subject, body):
     smtp.quit()
 
 
-def checkin(skip_wait_time=False, only_service=None, only_user=None, email_notice=True, log_callback=None):
+def sendTelegram(text):
+    config = loadConfig()
+    token = config.get("telegram_bot_token", "")
+    chat_id = config.get("telegram_chat_id", "")
+    proxy = config.get("telegram_proxy", "").strip()
+    if not token or not chat_id:
+        raise ValueError("Telegram Bot Token 或 Chat ID 未配置")
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    if proxy:
+        proxy_handler = urllib.request.ProxyHandler({"https": proxy, "http": proxy})
+        opener = urllib.request.build_opener(proxy_handler)
+        opener.open(req, timeout=30)
+    else:
+        urllib.request.urlopen(req, timeout=30)
+
+
+def checkin(skip_wait_time=False, only_service=None, only_user=None, email_notice=True, telegram_notice=True, log_callback=None):
     global _checkin_query, _checkin_query_list
 
     def log(msg):
@@ -272,3 +300,20 @@ def checkin(skip_wait_time=False, only_service=None, only_user=None, email_notic
             mail_body = genMailBody(d, mail_body)
             sendMail([users[ukey]["email"]], "自动签到通知 " + d, mail_body)
         log("已发送独立通知邮件")
+
+    if telegram_notice and config.get("telegram_enabled", False):
+        try:
+            tg_body = ""
+            for ukey in results:
+                tg_body += genTelegramUser(users[ukey]['name'])
+                for skey in results[ukey]:
+                    output = _checkin_query[results[ukey][skey]]
+                    tg_body += genTelegramService(services[skey]["name"], output)
+            dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+            tg_text = genTelegramMessage(dt, tg_body)
+            if len(tg_text) > 4000:
+                tg_text = tg_text[:4000] + "\n\n<i>... 内容过长已截断</i>"
+            sendTelegram(tg_text)
+            log("已发送 Telegram 通知")
+        except Exception as e:
+            log(f"Telegram 通知发送失败: {e}")
