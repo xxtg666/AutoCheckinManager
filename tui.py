@@ -1,13 +1,13 @@
 import os
 import time
 import threading
+from urllib.parse import urlparse
 from textual.app import App, ComposeResult
-from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Header, Footer, TabbedContent, TabPane,
     ListView, ListItem, Label, Input, Button,
-    RadioSet, RadioButton, Checkbox, RichLog, Static,
+    Checkbox, RichLog, Static,
 )
 from textual.binding import Binding
 import core
@@ -30,6 +30,28 @@ class ServiceTab(TabPane):
                 yield Input(id="service-command", placeholder="签到命令")
                 yield Label("配置文件字段")
                 yield Input(id="service-config-key", placeholder="配置键名")
+                yield Label("远程登录", classes="panel-title")
+                yield Checkbox("启用 Browser Run 交互式登录", id="service-login-enabled")
+                yield Static(
+                    "工作方式：Telegram 中点击服务登录后，程序会在 Cloudflare Browser Run 打开登录页，并把远程浏览器链接发给你。你在手机上完成登录，回 Telegram 点“登录完成”，程序会提取 Cookie / localStorage / sessionStorage，先显示掩码摘要，确认后才保存。",
+                    classes="help-text",
+                )
+                yield Label("登录页 URL")
+                yield Input(id="service-login-url", placeholder="https://example.com/login")
+                yield Label("Cookie 域名")
+                yield Input(id="service-login-cookie-domain", placeholder=".example.com（可留空）")
+                yield Label("存储 Origin")
+                yield Input(id="service-login-origin", placeholder="https://example.com（留空则由登录 URL 推断）")
+                yield Label("要提取的 Cookie 名称")
+                yield Input(id="service-login-cookie-names", placeholder="多个用逗号分隔，例如 sid, session")
+                yield Label("要提取的 localStorage 键")
+                yield Input(id="service-login-local-storage", placeholder="多个用逗号分隔，例如 token, userInfo")
+                yield Label("要提取的 sessionStorage 键")
+                yield Input(id="service-login-session-storage", placeholder="多个用逗号分隔，例如 csrf")
+                yield Label("凭据模板")
+                yield Input(id="service-credential-template", placeholder="例如 sid={sid}; token={token}；留空则自动拼 Cookie 或保存 JSON")
+                yield Label("过期关键词")
+                yield Input(id="service-expire-keywords", placeholder="用逗号分隔，例如 登录过期,401,unauthorized")
                 yield Label("随机等待时间（秒）")
                 with Horizontal(classes="wait-time-row"):
                     yield Input(id="service-wait-min", placeholder="最小", type="integer")
@@ -59,6 +81,15 @@ class ServiceTab(TabPane):
         self.query_one("#service-name", Input).value = s["name"]
         self.query_one("#service-command", Input).value = s["command"]
         self.query_one("#service-config-key", Input).value = s["key"]
+        self.query_one("#service-login-enabled", Checkbox).value = s.get("login_enabled", False)
+        self.query_one("#service-login-url", Input).value = s.get("login_url", "")
+        self.query_one("#service-login-cookie-domain", Input).value = s.get("login_cookie_domain", "")
+        self.query_one("#service-login-origin", Input).value = s.get("login_origin", "")
+        self.query_one("#service-login-cookie-names", Input).value = s.get("login_cookie_names", "")
+        self.query_one("#service-login-local-storage", Input).value = s.get("login_local_storage_names", "")
+        self.query_one("#service-login-session-storage", Input).value = s.get("login_session_storage_names", "")
+        self.query_one("#service-credential-template", Input).value = s.get("credential_template", "")
+        self.query_one("#service-expire-keywords", Input).value = s.get("expire_keywords", "")
         self.query_one("#service-wait-min", Input).value = str(s["wait_time_min"])
         self.query_one("#service-wait-max", Input).value = str(s["wait_time_max"])
 
@@ -76,6 +107,15 @@ class ServiceTab(TabPane):
         self.query_one("#service-name", Input).value = ""
         self.query_one("#service-command", Input).value = ""
         self.query_one("#service-config-key", Input).value = ""
+        self.query_one("#service-login-enabled", Checkbox).value = False
+        self.query_one("#service-login-url", Input).value = ""
+        self.query_one("#service-login-cookie-domain", Input).value = ""
+        self.query_one("#service-login-origin", Input).value = ""
+        self.query_one("#service-login-cookie-names", Input).value = ""
+        self.query_one("#service-login-local-storage", Input).value = ""
+        self.query_one("#service-login-session-storage", Input).value = ""
+        self.query_one("#service-credential-template", Input).value = ""
+        self.query_one("#service-expire-keywords", Input).value = ""
         self.query_one("#service-wait-min", Input).value = "0"
         self.query_one("#service-wait-max", Input).value = "0"
 
@@ -84,14 +124,46 @@ class ServiceTab(TabPane):
         if not sid:
             self.app.notify("服务ID不能为空", severity="error")
             return
+        login_url = self.query_one("#service-login-url", Input).value.strip()
+        login_enabled = self.query_one("#service-login-enabled", Checkbox).value
+        if login_enabled:
+            if not login_url:
+                self.app.notify("启用远程登录时必须填写登录页 URL", severity="error")
+                return
+            parsed = urlparse(login_url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                self.app.notify("登录页 URL 必须是完整的 http/https 地址", severity="error")
+                return
+
         services = core.loadServices()
-        services[sid] = {
+        service = {
             "name": self.query_one("#service-name", Input).value,
             "command": self.query_one("#service-command", Input).value,
             "key": self.query_one("#service-config-key", Input).value,
+            "login_enabled": login_enabled,
+            "login_url": login_url,
+            "login_cookie_domain": self.query_one("#service-login-cookie-domain", Input).value,
+            "login_origin": self.query_one("#service-login-origin", Input).value,
+            "login_cookie_names": self.query_one("#service-login-cookie-names", Input).value,
+            "login_local_storage_names": self.query_one("#service-login-local-storage", Input).value,
+            "login_session_storage_names": self.query_one("#service-login-session-storage", Input).value,
+            "credential_template": self.query_one("#service-credential-template", Input).value,
+            "expire_keywords": self.query_one("#service-expire-keywords", Input).value,
             "wait_time_min": int(self.query_one("#service-wait-min", Input).value or 0),
             "wait_time_max": int(self.query_one("#service-wait-max", Input).value or 0),
         }
+        service.update(core.buildBrowserRunLoginCommands(sid, service))
+        service["login_extractors"] = core.buildLoginExtractors(service)
+        if login_enabled:
+            config = core.loadConfig()
+            missing = []
+            if not config.get("cf_account_id"):
+                missing.append("Cloudflare Account ID")
+            if not config.get("cf_api_token"):
+                missing.append("Cloudflare API Token")
+            if missing:
+                self.app.notify("远程登录已启用，但还未配置：" + "、".join(missing), severity="warning")
+        services[sid] = service
         core.saveServices(services)
         self._refresh_list()
         self.app.notify(f"服务 {sid} 保存成功")
@@ -111,269 +183,66 @@ class ServiceTab(TabPane):
             self.app.notify(f"服务 {sid} 不存在", severity="error")
 
 
-class UserConfigScreen(ModalScreen):
-    """用户配置编辑界面：勾选启用的服务 + 填写每个服务的配置值"""
-
-    CSS = """
-    UserConfigScreen {
-        align: center middle;
-    }
-    #ucfg-dialog {
-        width: 70;
-        max-height: 80%;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-    #ucfg-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    #ucfg-scroll {
-        height: 1fr;
-        margin-bottom: 1;
-    }
-    .ucfg-service-block {
-        height: auto;
-        margin-bottom: 1;
-        padding: 0 1;
-    }
-    .ucfg-config-label {
-        margin-left: 4;
-        color: $text-muted;
-    }
-    .ucfg-config-input {
-        margin-left: 4;
-    }
-    .ucfg-buttons {
-        height: 3;
-        align: right middle;
-    }
-    .ucfg-buttons Button {
-        margin-left: 1;
-    }
-    """
-
-    def __init__(self, user_id: str, user_name: str) -> None:
-        super().__init__()
-        self.user_id = user_id
-        self.user_name = user_name
-
+class AccountTab(TabPane):
     def compose(self) -> ComposeResult:
-        services = core.loadServices()
-        user_config = core.loadUserConfig(self.user_id)
-        enabled = user_config.get("services", [])
-        config_vals = user_config.get("config", {})
-
-        with Vertical(id="ucfg-dialog"):
-            yield Label(f"编辑用户配置 - {self.user_name}", id="ucfg-title")
-            with VerticalScroll(id="ucfg-scroll"):
-                if not services:
-                    yield Label("没有可用的签到服务，请先创建服务。")
-                for sid, svc in services.items():
-                    with Vertical(classes="ucfg-service-block"):
-                        yield Checkbox(
-                            f"{svc['name']}  ({sid})",
-                            value=(sid in enabled),
-                            id=f"ucfg-cb-{sid}",
+        with VerticalScroll():
+            yield Label("账号设置", classes="panel-title")
+            yield Label("账号名称")
+            yield Input(id="account-name", placeholder="默认账号")
+            yield Static("Telegram Bot 可使用 /set <服务ID> <凭据> 或 /setkey <字段名> <凭据> 修改下方登录凭据。", classes="tg-hint")
+            yield Label("服务与登录凭据", classes="panel-title")
+            services = core.loadServices()
+            account = core.loadAccount()
+            enabled = account.get("services", [])
+            config_vals = account.get("config", {})
+            if not services:
+                yield Label("没有可用的签到服务，请先创建服务。")
+            for sid, svc in services.items():
+                with Vertical(classes="account-service-block"):
+                    yield Checkbox(
+                        f"{svc['name']}  ({sid})",
+                        value=(sid in enabled),
+                        id=f"account-cb-{sid}",
+                    )
+                    if svc.get("key"):
+                        yield Label(
+                            f"配置字段 [{svc['key']}]（填入命令中 {{config}} 的值）",
+                            classes="account-config-label",
                         )
-                        if svc.get("key"):
-                            yield Label(
-                                f"配置字段 [{svc['key']}]（填入命令中 {{config}} 的值）",
-                                classes="ucfg-config-label",
-                            )
-                            yield Input(
-                                value=config_vals.get(svc["key"], ""),
-                                placeholder=f"输入 {svc['key']} 的值",
-                                id=f"ucfg-input-{sid}",
-                                classes="ucfg-config-input",
-                            )
-            with Horizontal(classes="ucfg-buttons"):
-                yield Button("保存", id="ucfg-save", variant="success")
-                yield Button("取消", id="ucfg-cancel", variant="default")
+                        yield Input(
+                            value=config_vals.get(svc["key"], ""),
+                            placeholder=f"输入 {svc['key']} 的值",
+                            id=f"account-input-{sid}",
+                            classes="account-config-input",
+                        )
+            yield Button("保存账号配置", id="btn-save-account", variant="success")
+
+    def on_mount(self) -> None:
+        account = core.loadAccount()
+        self.query_one("#account-name", Input).value = account.get("name", "默认账号")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "ucfg-save":
-            self._save()
-        elif event.button.id == "ucfg-cancel":
-            self.dismiss(False)
+        if event.button.id == "btn-save-account":
+            self._save_account()
 
-    def _save(self) -> None:
+    def _save_account(self) -> None:
+        name = self.query_one("#account-name", Input).value.strip()
+        if not name:
+            self.app.notify("账号名称不能为空", severity="error")
+            return
         services = core.loadServices()
         enabled = []
         config_vals = {}
         for sid, svc in services.items():
-            cb = self.query_one(f"#ucfg-cb-{sid}", Checkbox)
+            cb = self.query_one(f"#account-cb-{sid}", Checkbox)
             if cb.value:
                 enabled.append(sid)
             if svc.get("key"):
-                try:
-                    inp = self.query_one(f"#ucfg-input-{sid}", Input)
-                    val = inp.value
-                except Exception:
-                    val = ""
-                if val:
-                    config_vals[svc["key"]] = val
-        user_config = {"services": enabled, "config": config_vals}
-        core.saveUserConfig(self.user_id, user_config)
-        self.app.notify(f"用户 {self.user_name} 的配置已保存")
-        self.dismiss(True)
-
-
-class UserTab(TabPane):
-    def compose(self) -> ComposeResult:
-        with Horizontal():
-            with Vertical(id="user-list-panel"):
-                yield Label("用户列表", classes="panel-title")
-                yield ListView(id="user-list")
-                yield Button("新建用户", id="btn-new-user", variant="primary")
-            with VerticalScroll(id="user-edit-panel"):
-                yield Label("用户设置", classes="panel-title")
-                yield Label("ID")
-                yield Input(id="user-id", placeholder="用户ID", disabled=True)
-                yield Label("名称")
-                yield Input(id="user-name", placeholder="用户名称")
-                yield Label("邮件地址")
-                yield Input(id="user-email", placeholder="用户邮箱")
-                with Horizontal(classes="button-row"):
-                    yield Button("保存", id="btn-save-user", variant="success")
-                    yield Button("删除", id="btn-delete-user", variant="error")
-                    yield Button("编辑配置", id="btn-edit-user-config", variant="default")
-
-    def on_mount(self) -> None:
-        self._refresh_list()
-
-    def _refresh_list(self) -> None:
-        lv = self.query_one("#user-list", ListView)
-        lv.clear()
-        users = core.loadUsers()
-        for key in users:
-            lv.append(ListItem(Label(users[key]["name"]), name=key))
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        uid = event.item.name
-        users = core.loadUsers()
-        if uid not in users:
-            return
-        u = users[uid]
-        self.query_one("#user-id", Input).value = uid
-        self.query_one("#user-name", Input).value = u["name"]
-        self.query_one("#user-email", Input).value = u["email"]
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-new-user":
-            self._new_user()
-        elif event.button.id == "btn-save-user":
-            self._save_user()
-        elif event.button.id == "btn-delete-user":
-            self._delete_user()
-        elif event.button.id == "btn-edit-user-config":
-            self._edit_user_config()
-
-    def _new_user(self) -> None:
-        self.query_one("#user-id", Input).value = core.generateRandomID()
-        self.query_one("#user-name", Input).value = ""
-        self.query_one("#user-email", Input).value = ""
-
-    def _save_user(self) -> None:
-        uid = self.query_one("#user-id", Input).value.strip()
-        name = self.query_one("#user-name", Input).value.strip()
-        email = self.query_one("#user-email", Input).value.strip()
-        if not name:
-            self.app.notify("用户名不能为空", severity="error")
-            return
-        users = core.loadUsers()
-        for key in users:
-            if users[key]["name"] == name and key != uid:
-                self.app.notify(f"用户名 {name} 已存在", severity="error")
-                return
-        if uid in users:
-            users[uid]["name"] = name
-            users[uid]["email"] = email
-        else:
-            users[uid] = {"name": name, "email": email, "services": [], "config": {}}
-        core.saveUsers(users)
-        self._refresh_list()
-        self.app.notify(f"用户 {name} 保存成功")
-
-    def _delete_user(self) -> None:
-        uid = self.query_one("#user-id", Input).value.strip()
-        if not uid:
-            return
-        users = core.loadUsers()
-        if uid in users:
-            name = users[uid]["name"]
-            del users[uid]
-            core.saveUsers(users)
-            self._refresh_list()
-            self._new_user()
-            self.app.notify(f"用户 {name} 已删除")
-        else:
-            self.app.notify("用户不存在", severity="error")
-
-    def _edit_user_config(self) -> None:
-        uid = self.query_one("#user-id", Input).value.strip()
-        if not uid:
-            self.app.notify("请先选择或新建用户", severity="warning")
-            return
-        users = core.loadUsers()
-        if uid not in users:
-            self.app.notify("请先保存用户", severity="warning")
-            return
-        self.app.push_screen(UserConfigScreen(uid, users[uid]["name"]))
-
-
-class EmailTab(TabPane):
-    def compose(self) -> ComposeResult:
-        with VerticalScroll():
-            yield Label("邮件配置", classes="panel-title")
-            yield Label("SMTP 服务器")
-            yield Input(id="email-server", placeholder="例如 smtp.example.com")
-            yield Label("邮箱账户")
-            yield Input(id="email-account", placeholder="your@email.com")
-            yield Label("邮箱密码")
-            yield Input(id="email-password", placeholder="密码/授权码", password=True)
-            yield Label("通知方式")
-            yield RadioSet(
-                RadioButton("不通知", id="radio-no"),
-                RadioButton("一起通知", id="radio-all"),
-                RadioButton("独立通知", id="radio-div"),
-                id="notice-type",
-            )
-            yield Button("保存配置", id="btn-save-config", variant="success")
-
-    def on_mount(self) -> None:
-        config = core.loadConfig()
-        self.query_one("#email-server", Input).value = config.get("email_server", "")
-        self.query_one("#email-account", Input).value = config.get("email_account", "")
-        self.query_one("#email-password", Input).value = config.get("email_password", "")
-        notice = config.get("email_notice_type", "no")
-        radio_map = {"no": 0, "all": 1, "div": 2}
-        rs = self.query_one("#notice-type", RadioSet)
-        idx = radio_map.get(notice, 0)
-        rs._selected = idx
-        for i, btn in enumerate(rs.query(RadioButton)):
-            btn.value = (i == idx)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-save-config":
-            self._save_config()
-
-    def _save_config(self) -> None:
-        rs = self.query_one("#notice-type", RadioSet)
-        notice_type = "no"
-        for i, btn in enumerate(rs.query(RadioButton)):
-            if btn.value:
-                notice_type = ["no", "all", "div"][i]
-                break
-        config = {
-            "email_server": self.query_one("#email-server", Input).value,
-            "email_account": self.query_one("#email-account", Input).value,
-            "email_password": self.query_one("#email-password", Input).value,
-            "email_notice_type": notice_type,
-        }
-        core.saveConfig(config)
-        self.app.notify("配置保存成功")
+                inp = self.query_one(f"#account-input-{sid}", Input)
+                if inp.value:
+                    config_vals[svc["key"]] = inp.value
+        core.saveAccount({"name": name, "services": enabled, "config": config_vals})
+        self.app.notify("账号配置保存成功")
 
 
 class TelegramTab(TabPane):
@@ -381,36 +250,63 @@ class TelegramTab(TabPane):
         with VerticalScroll():
             yield Label("Telegram 配置", classes="panel-title")
             yield Checkbox("启用 Telegram 通知", id="tg-enabled")
+            yield Checkbox("启用 Bot 命令监听", id="tg-bot-enabled")
             yield Label("Bot Token")
             yield Input(id="tg-bot-token", placeholder="从 @BotFather 获取")
             yield Label("Chat ID")
             yield Input(id="tg-chat-id", placeholder="目标聊天/群组 ID")
             yield Label("代理地址")
             yield Input(id="tg-proxy", placeholder="例如 http://127.0.0.1:7890（留空不使用）")
-            yield Static("提示：仅支持「一起通知」模式，所有用户的签到结果\n合并为一条消息发送到指定聊天。", classes="tg-hint")
+            yield Label("远程浏览器登录", classes="panel-title")
+            yield Static(
+                "用于 Telegram 的交互式登录。服务启用 Browser Run 登录后，Bot 会创建远程浏览器并发送可操作链接；登录完成后会提取 Cookie / localStorage / sessionStorage，并在确认后保存。",
+                classes="help-text",
+            )
+            yield Label("Cloudflare Account ID")
+            yield Input(id="cf-account-id", placeholder="Cloudflare Account ID")
+            yield Label("Cloudflare API Token")
+            yield Input(id="cf-api-token", placeholder="需要 Browser Run 权限", password=True)
+            yield Label("浏览器会话保持时间（毫秒）")
+            yield Input(id="cf-keep-alive", placeholder="默认 600000，即 10 分钟", type="integer")
+            yield Static("Bot 命令：/help /status /services /login /done /confirm-login /checkin。常用操作会通过按钮出现。", classes="tg-hint")
             with Horizontal(classes="button-row"):
                 yield Button("保存配置", id="btn-save-telegram", variant="success")
                 yield Button("发送测试", id="btn-test-telegram", variant="primary")
+                yield Button("启动监听", id="btn-start-bot", variant="warning")
+                yield Button("停止监听", id="btn-stop-bot", variant="default")
+            yield RichLog(id="telegram-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:
         config = core.loadConfig()
         self.query_one("#tg-enabled", Checkbox).value = config.get("telegram_enabled", False)
+        self.query_one("#tg-bot-enabled", Checkbox).value = config.get("telegram_bot_enabled", False)
         self.query_one("#tg-bot-token", Input).value = config.get("telegram_bot_token", "")
         self.query_one("#tg-chat-id", Input).value = config.get("telegram_chat_id", "")
         self.query_one("#tg-proxy", Input).value = config.get("telegram_proxy", "")
+        self.query_one("#cf-account-id", Input).value = config.get("cf_account_id", "")
+        self.query_one("#cf-api-token", Input).value = config.get("cf_api_token", "")
+        self.query_one("#cf-keep-alive", Input).value = str(config.get("cf_browser_keep_alive", "600000"))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-save-telegram":
             self._save_config()
         elif event.button.id == "btn-test-telegram":
             self._test_send()
+        elif event.button.id == "btn-start-bot":
+            self._start_bot()
+        elif event.button.id == "btn-stop-bot":
+            self._stop_bot()
 
     def _save_config(self) -> None:
         config = {
             "telegram_enabled": self.query_one("#tg-enabled", Checkbox).value,
+            "telegram_bot_enabled": self.query_one("#tg-bot-enabled", Checkbox).value,
             "telegram_bot_token": self.query_one("#tg-bot-token", Input).value,
             "telegram_chat_id": self.query_one("#tg-chat-id", Input).value,
             "telegram_proxy": self.query_one("#tg-proxy", Input).value,
+            "cf_account_id": self.query_one("#cf-account-id", Input).value,
+            "cf_api_token": self.query_one("#cf-api-token", Input).value,
+            "cf_browser_keep_alive": self.query_one("#cf-keep-alive", Input).value or "600000",
         }
         core.saveConfig(config)
         self.app.notify("Telegram 配置保存成功")
@@ -423,26 +319,57 @@ class TelegramTab(TabPane):
         except Exception as e:
             self.app.notify(f"发送失败: {e}", severity="error")
 
+    def _start_bot(self) -> None:
+        self._save_config()
+        log_widget = self.query_one("#telegram-log", RichLog)
+
+        def log_callback(msg):
+            self.app.call_from_thread(log_widget.write, msg)
+
+        started = core.startTelegramBot(log_callback=log_callback)
+        if started:
+            self.app.notify("Telegram Bot 监听已启动")
+        else:
+            self.app.notify("Telegram Bot 监听已在运行")
+
+    def _stop_bot(self) -> None:
+        core.stopTelegramBot()
+        self.app.notify("Telegram Bot 监听停止请求已发送")
+
 
 class CheckinTab(TabPane):
     def compose(self) -> ComposeResult:
         with Vertical():
+            yield Label("定时运行", classes="panel-title")
+            with Horizontal(classes="option-row"):
+                yield Checkbox("启用每日定时签到", id="schedule-enabled")
+                yield Checkbox("定时签到跳过随机等待", id="schedule-skip-wait")
+            yield Label("每日执行时间")
+            yield Input(id="schedule-time", placeholder="HH:MM，例如 08:00")
+            with Horizontal(classes="button-row"):
+                yield Button("保存定时配置", id="btn-save-schedule", variant="success")
+                yield Button("启动常驻调度", id="btn-start-scheduler", variant="warning")
+                yield Button("停止常驻调度", id="btn-stop-scheduler", variant="default")
             yield Label("签到选项", classes="panel-title")
             with Horizontal(classes="option-row"):
                 yield Checkbox("跳过随机等待", id="opt-skip-wait", value=True)
-                yield Checkbox("发送邮件通知", id="opt-email-notice")
                 yield Checkbox("发送Telegram通知", id="opt-tg-notice")
             yield Label("仅执行指定服务（留空=全部）")
             yield Input(id="opt-only-service", placeholder="服务ID（留空执行全部）")
-            yield Label("仅执行指定用户（留空=全部）")
-            yield Input(id="opt-only-user", placeholder="用户ID（留空执行全部）")
             with Horizontal(classes="button-row"):
                 yield Button("执行签到", id="btn-run-checkin", variant="warning")
             yield Label("", id="last-checkin-time")
             yield RichLog(id="checkin-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:
+        self._load_schedule()
         self._update_last_time()
+
+    def _load_schedule(self) -> None:
+        config = core.loadConfig()
+        self.query_one("#schedule-enabled", Checkbox).value = config.get("schedule_enabled", True)
+        self.query_one("#schedule-skip-wait", Checkbox).value = config.get("schedule_skip_wait", False)
+        self.query_one("#schedule-time", Input).value = config.get("schedule_time", "08:00")
 
     def _update_last_time(self) -> None:
         t = core.loadLastCheckinTime()
@@ -455,6 +382,45 @@ class CheckinTab(TabPane):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-run-checkin":
             self._run_checkin()
+        elif event.button.id == "btn-save-schedule":
+            self._save_schedule()
+        elif event.button.id == "btn-start-scheduler":
+            self._start_scheduler()
+        elif event.button.id == "btn-stop-scheduler":
+            self._stop_scheduler()
+
+    def _save_schedule(self) -> bool:
+        schedule_time = self.query_one("#schedule-time", Input).value.strip()
+        try:
+            core.validateScheduleTime(schedule_time)
+        except Exception as e:
+            self.app.notify(str(e), severity="error")
+            return False
+        core.saveConfig({
+            "schedule_enabled": self.query_one("#schedule-enabled", Checkbox).value,
+            "schedule_skip_wait": self.query_one("#schedule-skip-wait", Checkbox).value,
+            "schedule_time": schedule_time,
+        })
+        self.app.notify("定时配置保存成功")
+        return True
+
+    def _start_scheduler(self) -> None:
+        if not self._save_schedule():
+            return
+        log_widget = self.query_one("#checkin-log", RichLog)
+
+        def log_callback(msg):
+            self.app.call_from_thread(log_widget.write, msg)
+
+        started = core.startScheduler(log_callback=log_callback)
+        if started:
+            self.app.notify("常驻调度已启动")
+        else:
+            self.app.notify("常驻调度已在运行")
+
+    def _stop_scheduler(self) -> None:
+        core.stopScheduler()
+        self.app.notify("常驻调度停止请求已发送")
 
     def _run_checkin(self) -> None:
         log_widget = self.query_one("#checkin-log", RichLog)
@@ -463,10 +429,8 @@ class CheckinTab(TabPane):
         btn.disabled = True
 
         skip_wait = self.query_one("#opt-skip-wait", Checkbox).value
-        email_notice = self.query_one("#opt-email-notice", Checkbox).value
         telegram_notice = self.query_one("#opt-tg-notice", Checkbox).value
         only_service = self.query_one("#opt-only-service", Input).value.strip() or None
-        only_user = self.query_one("#opt-only-user", Input).value.strip() or None
 
         def log_callback(msg):
             self.app.call_from_thread(log_widget.write, msg)
@@ -476,8 +440,6 @@ class CheckinTab(TabPane):
                 core.checkin(
                     skip_wait_time=skip_wait,
                     only_service=only_service,
-                    only_user=only_user,
-                    email_notice=email_notice,
                     telegram_notice=telegram_notice,
                     log_callback=log_callback,
                 )
@@ -498,12 +460,12 @@ class ACMApp(App):
     Screen {
         background: $surface;
     }
-    #service-list-panel, #user-list-panel {
+    #service-list-panel {
         width: 1fr;
         max-width: 40;
         height: 100%;
     }
-    #service-edit-panel, #user-edit-panel {
+    #service-edit-panel {
         width: 2fr;
         height: 100%;
         padding: 0 1;
@@ -541,6 +503,23 @@ class ACMApp(App):
         color: $text-muted;
         margin-top: 1;
     }
+    .account-service-block {
+        height: auto;
+        margin-bottom: 1;
+        padding: 0 1;
+    }
+    .account-config-label {
+        margin-left: 4;
+        color: $text-muted;
+    }
+    .account-config-input {
+        margin-left: 4;
+    }
+    #telegram-log {
+        height: 1fr;
+        border: solid $accent;
+        margin-top: 1;
+    }
     ListView {
         height: 1fr;
     }
@@ -556,9 +535,7 @@ class ACMApp(App):
         with TabbedContent():
             with ServiceTab("签到服务"):
                 pass
-            with UserTab("用户管理"):
-                pass
-            with EmailTab("邮件配置"):
+            with AccountTab("账号配置"):
                 pass
             with TelegramTab("Telegram"):
                 pass
