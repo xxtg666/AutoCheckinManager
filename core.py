@@ -7,11 +7,21 @@ import platform
 import threading
 import subprocess
 import urllib.request
+import urllib.error
+import html
 from resources_acm import genTelegramMessage, genTelegramUser, genTelegramService
 
 DATA_FILE = "data.json"
 BOT_POLL_INTERVAL = 3
 SCHEDULER_POLL_INTERVAL = 300
+
+
+class TelegramApiError(RuntimeError):
+    def __init__(self, method, description, error_code=None):
+        super().__init__(description)
+        self.method = method
+        self.description = description
+        self.error_code = error_code
 
 _EMPTY_DATA = {
     "config": {
@@ -376,14 +386,53 @@ def _delayCommand(delay, command, query_item):
     print("任务 " + query_item + " 执行完成")
 
 
-def _openTelegram(req):
+def _openTelegram(req, timeout=30):
     config = loadConfig()
     proxy = config.get("telegram_proxy", "").strip()
     if proxy:
         proxy_handler = urllib.request.ProxyHandler({"https": proxy, "http": proxy})
         opener = urllib.request.build_opener(proxy_handler)
-        return opener.open(req, timeout=30)
-    return urllib.request.urlopen(req, timeout=30)
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _h(value):
+    return html.escape(str(value), quote=False)
+
+
+def _telegramApi(method, body=None, timeout=30):
+    config = loadConfig()
+    token = config.get("telegram_bot_token", "")
+    if not token:
+        raise ValueError("Telegram Bot Token 未配置")
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    payload = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with _openTelegram(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            data = {"ok": False, "description": str(e), "error_code": e.code}
+    if not data.get("ok"):
+        raise TelegramApiError(
+            method,
+            data.get("description", f"Telegram API {method} 调用失败"),
+            data.get("error_code"),
+        )
+    return data.get("result")
+
+
+def _retryWithoutParseMode(method, body, error):
+    if not isinstance(error, TelegramApiError):
+        raise error
+    if error.error_code != 400 or "parse" not in error.description.lower():
+        raise error
+    fallback = dict(body)
+    fallback.pop("parse_mode", None)
+    return _telegramApi(method, fallback)
 
 
 def sendTelegram(text):
@@ -396,17 +445,34 @@ def sendTelegramMessage(text, reply_markup=None):
     chat_id = config.get("telegram_chat_id", "")
     if not token or not chat_id:
         raise ValueError("Telegram Bot Token 或 Chat ID 未配置")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
     body = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
     if reply_markup:
         body["reply_markup"] = reply_markup
-    payload = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    _openTelegram(req)
+    try:
+        return _telegramApi("sendMessage", body)
+    except Exception as e:
+        return _retryWithoutParseMode("sendMessage", body, e)
+
+
+def editTelegramMessage(chat_id, message_id, text, reply_markup=None):
+    body = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        body["reply_markup"] = reply_markup
+    try:
+        return _telegramApi("editMessageText", body)
+    except Exception as e:
+        return _retryWithoutParseMode("editMessageText", body, e)
 
 
 def answerTelegramCallback(callback_query_id, text=""):
@@ -414,30 +480,34 @@ def answerTelegramCallback(callback_query_id, text=""):
     token = config.get("telegram_bot_token", "")
     if not token:
         return
-    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
-    payload = json.dumps({
+    try:
+        _telegramApi("answerCallbackQuery", {
         "callback_query_id": callback_query_id,
         "text": text,
         "show_alert": False,
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    _openTelegram(req)
+        })
+    except Exception:
+        pass
+
+
+def clearTelegramWebhook(log_callback=None):
+    try:
+        _telegramApi("deleteWebhook", {"drop_pending_updates": False})
+        if log_callback:
+            log_callback("Telegram webhook 已清理，使用 long polling 监听")
+    except Exception as e:
+        if log_callback:
+            log_callback(f"清理 Telegram webhook 失败: {e}")
 
 
 def getTelegramUpdates(offset=0):
-    config = loadConfig()
-    token = config.get("telegram_bot_token", "")
-    if not token:
-        raise ValueError("Telegram Bot Token 未配置")
-    url = f"https://api.telegram.org/bot{token}/getUpdates?timeout=20"
+    body = {
+        "timeout": 50,
+        "allowed_updates": ["message", "edited_message", "callback_query"],
+    }
     if offset:
-        url += f"&offset={offset}"
-    req = urllib.request.Request(url)
-    with _openTelegram(req) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    if not data.get("ok"):
-        raise RuntimeError(data.get("description", "Telegram getUpdates 调用失败"))
-    return data.get("result", [])
+        body["offset"] = offset
+    return _telegramApi("getUpdates", body, timeout=60) or []
 
 
 def _mask(value):
@@ -459,49 +529,140 @@ def _serviceHelp():
     return "\n".join(lines)
 
 
-def _serviceKeyboard(sid):
-    return [
-        [
-            {"text": "立即签到", "callback_data": f"acm:checkin:{sid}"},
-            {"text": "更新登录", "callback_data": f"acm:login:{sid}"},
-        ],
-        [
-            {"text": "登录完成", "callback_data": f"acm:login_done:{sid}"},
-            {"text": "取消登录", "callback_data": f"acm:login_cancel:{sid}"},
-        ],
-        [
-            {"text": "查看状态", "callback_data": f"acm:status:{sid}"},
-        ],
-    ]
+def _mainMenuText():
+    config = loadConfig()
+    return (
+        "<b>AutoCheckinManager</b>\n\n"
+        f"定时签到：{'启用' if config.get('schedule_enabled', True) else '禁用'} "
+        f"{config.get('schedule_time', '08:00')}\n"
+        f"Telegram 通知：{'启用' if config.get('telegram_enabled', False) else '禁用'}\n"
+        f"Bot 监听：{'启用' if config.get('telegram_bot_enabled', False) else '禁用'}\n\n"
+        "选择下面的菜单继续。"
+    )
 
 
 def _mainKeyboard():
-    services = loadServices()
-    rows = [
+    return [
         [
-            {"text": "状态", "callback_data": "acm:status"},
-            {"text": "服务", "callback_data": "acm:services"},
-            {"text": "全部签到", "callback_data": "acm:checkin"},
-        ]
+            {"text": "服务管理", "callback_data": "acm:services"},
+            {"text": "账号状态", "callback_data": "acm:status"},
+        ],
+        [
+            {"text": "执行全部签到", "callback_data": "acm:checkin"},
+        ],
     ]
+
+
+def _servicesKeyboard():
+    services = loadServices()
+    account = loadAccount()
+    enabled = set(account.get("services", []))
+    rows = []
     for sid, svc in services.items():
-        rows.append([
-            {"text": f"{svc.get('name', sid)} 登录", "callback_data": f"acm:login:{sid}"},
-            {"text": "签到", "callback_data": f"acm:checkin:{sid}"},
-        ])
+        mark = "ON" if sid in enabled else "OFF"
+        rows.append([{"text": f"{mark} {svc.get('name', sid)}", "callback_data": f"acm:service:{sid}"}])
+    rows.append([{"text": "返回主菜单", "callback_data": "acm:menu"}])
     return rows
 
 
-def _telegramResult(text, keyboard=None):
+def _servicesText():
+    services = loadServices()
+    if not services:
+        return "<b>服务管理</b>\n\n当前没有配置服务，请先在 TUI 中添加服务。"
+    return "<b>服务管理</b>\n\n选择一个服务查看详情、启用/禁用、签到或更新登录。"
+
+
+def _serviceText(sid):
+    account = loadAccount()
+    services = loadServices()
+    sessions = loadLoginSessions()
+    svc = services.get(sid)
+    if not svc:
+        return f"服务 {_h(sid)} 不存在。"
+    key = svc.get("key", "")
+    credential = account.get("config", {}).get(key, "") if key else ""
+    lines = [
+        f"<b>{_h(svc.get('name', sid))}</b>",
+        f"ID：<code>{_h(sid)}</code>",
+        f"状态：{'已启用' if sid in account.get('services', []) else '已禁用'}",
+        f"凭据字段：<code>{_h(key or '(无)')}</code>",
+        f"凭据：{_h(_mask(credential))}",
+        f"远程登录：{'已配置' if svc.get('login_enabled') and svc.get('login_start_command') else '未配置'}",
+    ]
+    session = sessions.get(sid)
+    if session:
+        lines.extend([
+            "",
+            "<b>登录会话</b>",
+            f"Session：<code>{_h(session.get('session', ''))}</code>",
+            f"状态：{_h(session.get('status', 'waiting'))}",
+        ])
+        if session.get("pending_preview"):
+            lines.append(_h(session["pending_preview"]))
+    return "\n".join(lines)
+
+
+def _serviceKeyboard(sid):
+    account = loadAccount()
+    services = loadServices()
+    sessions = loadLoginSessions()
+    svc = services.get(sid, {})
+    enabled = sid in account.get("services", [])
+    session = sessions.get(sid)
+    rows = []
+    rows.append([
+        {"text": "禁用服务" if enabled else "启用服务", "callback_data": f"acm:disable:{sid}" if enabled else f"acm:enable:{sid}"},
+        {"text": "立即签到", "callback_data": f"acm:checkin:{sid}"},
+    ])
+    if session:
+        if session.get("status") == "pending_confirm":
+            rows.append([
+                {"text": "确认保存", "callback_data": f"acm:login_save:{sid}"},
+                {"text": "重新提取", "callback_data": f"acm:login_done:{sid}"},
+            ])
+        else:
+            rows.append([
+                {"text": "登录完成", "callback_data": f"acm:login_done:{sid}"},
+                {"text": "继续登录页", "callback_data": f"acm:login_continue:{sid}"},
+            ])
+        rows.append([{"text": "取消登录会话", "callback_data": f"acm:login_cancel:{sid}"}])
+    elif svc.get("login_enabled") and svc.get("login_start_command"):
+        rows.append([{"text": "更新登录", "callback_data": f"acm:login:{sid}"}])
+    rows.append([
+        {"text": "刷新", "callback_data": f"acm:service:{sid}"},
+        {"text": "返回服务列表", "callback_data": "acm:services"},
+    ])
+    rows.append([{"text": "主菜单", "callback_data": "acm:menu"}])
+    return rows
+
+
+def _telegramResult(text, keyboard=None, prefer_edit=True):
     if keyboard:
-        return {"text": text, "reply_markup": {"inline_keyboard": keyboard}}
+        return {"text": text, "reply_markup": {"inline_keyboard": keyboard}, "prefer_edit": prefer_edit}
     return text
 
 
-def _sendTelegramResult(result):
+def _sendTelegramResult(result, callback=None):
     if not result:
         return
     if isinstance(result, dict):
+        if callback and result.get("prefer_edit", True):
+            message = callback.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            message_id = message.get("message_id")
+            if chat_id and message_id:
+                try:
+                    editTelegramMessage(chat_id, message_id, result.get("text", ""), result.get("reply_markup"))
+                    return
+                except TelegramApiError as e:
+                    if e.error_code == 400 and (
+                        "message is not modified" in e.description.lower()
+                        or "message to edit not found" in e.description.lower()
+                    ):
+                        return
+                except Exception:
+                    pass
         sendTelegramMessage(result.get("text", ""), result.get("reply_markup"))
     else:
         sendTelegram(result)
@@ -649,11 +810,12 @@ def startServiceLogin(sid):
     })
 
     lines = [f"{svc.get('name', sid)} 登录会话已创建。"]
+    lines.append(f"Session：<code>{_h(session_id)}</code>")
     if result.get("message"):
-        lines.append(result["message"])
+        lines.append(_h(result["message"]))
     live_url = result.get("live_url") or result.get("url")
     if live_url:
-        lines.append(f"\n打开链接完成登录：\n{live_url}")
+        lines.append(f"\n打开链接完成登录：\n{_h(live_url)}")
     lines.append("\n完成后点下面的“登录完成”。")
     return _telegramResult("\n".join(lines), _serviceKeyboard(sid))
 
@@ -707,14 +869,8 @@ def finishServiceLogin(sid):
         saveLoginSessions(sessions)
 
         return _telegramResult(
-            f"已从 {svc.get('name', sid)} 登录页面提取到凭据，请确认后保存。\n\n{session['pending_preview']}",
-            [[
-                {"text": "确认保存", "callback_data": f"acm:login_save:{sid}"},
-                {"text": "重新提取", "callback_data": f"acm:login_done:{sid}"},
-            ], [
-                {"text": "继续操作登录页", "callback_data": f"acm:login_continue:{sid}"},
-                {"text": "取消", "callback_data": f"acm:login_cancel:{sid}"},
-            ]],
+            _serviceText(sid),
+            _serviceKeyboard(sid),
         )
     except Exception as e:
         return _telegramResult(f"完成登录失败：{e}", _serviceKeyboard(sid))
@@ -740,13 +896,7 @@ def savePendingCredential(sid):
         account["services"].append(sid)
         saveAccount(account)
     _removeLoginSession(sid)
-    return _telegramResult(
-        f"已保存 {svc.get('name', sid)} 的登录凭据，并启用该服务。",
-        [[
-            {"text": "立即验证签到", "callback_data": f"acm:checkin:{sid}"},
-            {"text": "查看状态", "callback_data": f"acm:status:{sid}"},
-        ]],
-    )
+    return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
 
 
 def continueServiceLogin(sid):
@@ -760,7 +910,7 @@ def continueServiceLogin(sid):
     live_url = session.get("live_url", "")
     if live_url:
         return _telegramResult(
-            f"继续在这个页面完成登录：\n{live_url}\n\n完成后点“登录完成”。",
+            f"Session：<code>{_h(session.get('session', ''))}</code>\n\n继续在这个页面完成登录：\n{_h(live_url)}\n\n完成后点“登录完成”。",
             _serviceKeyboard(sid),
         )
     return _telegramResult("当前登录会话没有可打开的 Live View 链接。", _serviceKeyboard(sid))
@@ -782,7 +932,7 @@ def cancelServiceLogin(sid):
         except Exception:
             pass
     _removeLoginSession(sid)
-    return _telegramResult("已取消登录会话。", _mainKeyboard())
+    return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
 
 
 def serviceStatusText(sid=None):
@@ -832,26 +982,14 @@ def handleTelegramCommand(text):
     services = loadServices()
 
     if command in ("/start", "/help"):
-        return _telegramResult(
-            "AutoCheckinManager Bot 命令：\n"
-            "/status 查看账号和启用服务\n"
-            "/services 查看服务及凭据字段\n"
-            "/enable <服务ID> 启用服务\n"
-            "/disable <服务ID> 禁用服务\n"
-            "/set <服务ID> <凭据> 修改该服务登录凭据\n"
-            "/setkey <字段名> <凭据> 按字段名修改凭据\n"
-            "/login <服务ID> 启动交互式登录\n"
-            "/checkin [服务ID] 立即签到\n"
-            "/help 查看帮助",
-            _mainKeyboard(),
-        )
+        return _telegramResult(_mainMenuText(), _mainKeyboard())
 
     if command == "/services":
-        return _telegramResult(_serviceHelp(), _mainKeyboard())
+        return _telegramResult(_servicesText(), _servicesKeyboard())
 
     if command == "/status":
         sid = parts[1] if len(parts) >= 2 else None
-        return _telegramResult(serviceStatusText(sid), _serviceKeyboard(sid) if sid else _mainKeyboard())
+        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _mainKeyboard())
 
     if command in ("/enable", "/disable"):
         if len(parts) < 2:
@@ -865,7 +1003,7 @@ def handleTelegramCommand(text):
         if command == "/disable" and sid in enabled:
             enabled.remove(sid)
         saveAccount(account)
-        return _telegramResult(f"已{'启用' if command == '/enable' else '禁用'}服务 {sid}。", _serviceKeyboard(sid))
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
 
     if command == "/set":
         if len(parts) < 3:
@@ -887,7 +1025,7 @@ def handleTelegramCommand(text):
         if len(parts) < 3:
             return "用法：/setkey <字段名> <凭据>"
         setCredential(parts[1], parts[2])
-        return _telegramResult(f"已更新字段 {parts[1]}。", _mainKeyboard())
+        return _telegramResult(f"已更新字段 <code>{_h(parts[1])}</code>。", _mainKeyboard())
 
     if command == "/login":
         if len(parts) < 2:
@@ -930,9 +1068,25 @@ def handleTelegramCallback(data):
     action = parts[1]
     sid = parts[2] if len(parts) >= 3 else None
     if action == "status":
-        return _telegramResult(serviceStatusText(sid), _serviceKeyboard(sid) if sid else _mainKeyboard())
+        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _mainKeyboard())
+    if action == "menu":
+        return _telegramResult(_mainMenuText(), _mainKeyboard())
     if action == "services":
-        return _telegramResult(_serviceHelp(), _mainKeyboard())
+        return _telegramResult(_servicesText(), _servicesKeyboard())
+    if action == "service" and sid:
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
+    if action in ("enable", "disable") and sid:
+        services = loadServices()
+        if sid not in services:
+            return _telegramResult(f"服务 {_h(sid)} 不存在。", _servicesKeyboard())
+        account = loadAccount()
+        enabled = account.setdefault("services", [])
+        if action == "enable" and sid not in enabled:
+            enabled.append(sid)
+        if action == "disable" and sid in enabled:
+            enabled.remove(sid)
+        saveAccount(account)
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
     if action == "login" and sid:
         return startServiceLogin(sid)
     if action == "login_done" and sid:
@@ -964,6 +1118,7 @@ def startTelegramBot(log_callback=None):
     if _bot_thread and _bot_thread.is_alive():
         return False
     _bot_stop_event.clear()
+    clearTelegramWebhook(log_callback)
     _bot_thread = threading.Thread(target=_telegramBotLoop, args=(log_callback,), daemon=True)
     _bot_thread.start()
     return True
@@ -1005,7 +1160,7 @@ def _telegramBotLoop(log_callback=None):
                         continue
                     answerTelegramCallback(callback.get("id", ""), "处理中")
                     reply = handleTelegramCallback(callback.get("data", ""))
-                    _sendTelegramResult(reply)
+                    _sendTelegramResult(reply, callback=callback)
                     continue
                 message = update.get("message") or update.get("edited_message") or {}
                 chat = message.get("chat") or {}
@@ -1018,6 +1173,23 @@ def _telegramBotLoop(log_callback=None):
                     continue
                 reply = handleTelegramCommand(text)
                 _sendTelegramResult(reply)
+        except TelegramApiError as e:
+            desc = e.description or str(e)
+            if e.error_code == 409:
+                log(
+                    "Telegram Bot 监听冲突：getUpdates 被另一个实例或 webhook 占用。"
+                    "请确认服务器上只运行一个 AutoCheckinManager，或等待 webhook 清理后重试。"
+                )
+                time.sleep(30)
+                continue
+            if e.error_code == 400:
+                log(f"Telegram Bot 请求格式错误 ({e.method}): {desc}")
+                if "webhook" in desc.lower():
+                    clearTelegramWebhook(log_callback)
+                time.sleep(10)
+                continue
+            log(f"Telegram Bot API 错误 ({e.method}/{e.error_code}): {desc}")
+            time.sleep(10)
         except Exception as e:
             log(f"Telegram Bot 监听错误: {e}")
             time.sleep(10)
