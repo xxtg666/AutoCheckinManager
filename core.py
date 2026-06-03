@@ -531,12 +531,15 @@ def _serviceHelp():
 
 def _mainMenuText():
     config = loadConfig()
+    enabled = "✅" if config.get("schedule_enabled", True) else "⏸"
+    notice = "✅" if config.get("telegram_enabled", False) else "⏸"
+    bot = "✅" if config.get("telegram_bot_enabled", False) else "⏸"
     return (
-        "<b>AutoCheckinManager</b>\n\n"
-        f"定时签到：{'启用' if config.get('schedule_enabled', True) else '禁用'} "
+        "🤖 <b>AutoCheckinManager</b>\n\n"
+        f"{enabled} 定时签到：{'启用' if config.get('schedule_enabled', True) else '禁用'} "
         f"{config.get('schedule_time', '08:00')}\n"
-        f"Telegram 通知：{'启用' if config.get('telegram_enabled', False) else '禁用'}\n"
-        f"Bot 监听：{'启用' if config.get('telegram_bot_enabled', False) else '禁用'}\n\n"
+        f"{notice} Telegram 通知：{'启用' if config.get('telegram_enabled', False) else '禁用'}\n"
+        f"{bot} Bot 监听：{'启用' if config.get('telegram_bot_enabled', False) else '禁用'}\n\n"
         "选择下面的菜单继续。"
     )
 
@@ -544,32 +547,54 @@ def _mainMenuText():
 def _mainKeyboard():
     return [
         [
-            {"text": "服务管理", "callback_data": "acm:services"},
-            {"text": "账号状态", "callback_data": "acm:status"},
-        ],
-        [
-            {"text": "执行全部签到", "callback_data": "acm:checkin"},
+            {"text": "🧩 服务管理", "callback_data": "acm:services"},
+            {"text": "📊 账号状态", "callback_data": "acm:status"},
         ],
     ]
+
+
+def _statusKeyboard():
+    return [
+        [
+            {"text": "🧩 服务管理", "callback_data": "acm:services"},
+            {"text": "🔄 刷新状态", "callback_data": "acm:status"},
+        ],
+        [
+            {"text": "🏠 返回主菜单", "callback_data": "acm:menu"},
+        ],
+    ]
+
+
+def _serviceListLabel(sid, svc, account, sessions):
+    enabled = sid in account.get("services", [])
+    key = svc.get("key", "")
+    credential = account.get("config", {}).get(key, "") if key else ""
+    status = "✅" if enabled else "⏸"
+    credential_mark = "🔐" if credential else "⚠️"
+    session_mark = " 🧭" if sid in sessions else ""
+    return f"{status} {credential_mark} {svc.get('name', sid)}{session_mark}"
 
 
 def _servicesKeyboard():
     services = loadServices()
     account = loadAccount()
-    enabled = set(account.get("services", []))
+    sessions = loadLoginSessions()
     rows = []
     for sid, svc in services.items():
-        mark = "ON" if sid in enabled else "OFF"
-        rows.append([{"text": f"{mark} {svc.get('name', sid)}", "callback_data": f"acm:service:{sid}"}])
-    rows.append([{"text": "返回主菜单", "callback_data": "acm:menu"}])
+        rows.append([{"text": _serviceListLabel(sid, svc, account, sessions), "callback_data": f"acm:service:{sid}"}])
+    rows.append([{"text": "🏠 返回主菜单", "callback_data": "acm:menu"}])
     return rows
 
 
 def _servicesText():
     services = loadServices()
     if not services:
-        return "<b>服务管理</b>\n\n当前没有配置服务，请先在 TUI 中添加服务。"
-    return "<b>服务管理</b>\n\n选择一个服务查看详情、启用/禁用、签到或更新登录。"
+        return "🧩 <b>服务管理</b>\n\n当前没有配置服务，请先在 TUI 中添加服务。"
+    return (
+        "🧩 <b>服务管理</b>\n\n"
+        "✅ 启用　⏸ 禁用　🔐 已有凭据　⚠️ 缺少凭据　🧭 登录会话中\n\n"
+        "选择一个服务查看详情、启用/禁用、签到或更新登录。"
+    )
 
 
 def _serviceText(sid):
@@ -581,19 +606,21 @@ def _serviceText(sid):
         return f"服务 {_h(sid)} 不存在。"
     key = svc.get("key", "")
     credential = account.get("config", {}).get(key, "") if key else ""
+    enabled = sid in account.get("services", [])
+    login_ready = svc.get("login_enabled") and svc.get("login_start_command")
     lines = [
-        f"<b>{_h(svc.get('name', sid))}</b>",
-        f"ID：<code>{_h(sid)}</code>",
-        f"状态：{'已启用' if sid in account.get('services', []) else '已禁用'}",
-        f"凭据字段：<code>{_h(key or '(无)')}</code>",
-        f"凭据：{_h(_mask(credential))}",
-        f"远程登录：{'已配置' if svc.get('login_enabled') and svc.get('login_start_command') else '未配置'}",
+        f"🧩 <b>{_h(svc.get('name', sid))}</b>",
+        f"🆔 ID：<code>{_h(sid)}</code>",
+        f"{'✅' if enabled else '⏸'} 状态：{'已启用' if enabled else '已禁用'}",
+        f"🔑 凭据字段：<code>{_h(key or '(无)')}</code>",
+        f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
+        f"{'🌐' if login_ready else '➖'} 远程登录：{'已配置' if login_ready else '未配置'}",
     ]
     session = sessions.get(sid)
     if session:
         lines.extend([
             "",
-            "<b>登录会话</b>",
+            "🧭 <b>登录会话</b>",
             f"Session：<code>{_h(session.get('session', ''))}</code>",
             f"状态：{_h(session.get('status', 'waiting'))}",
         ])
@@ -611,28 +638,28 @@ def _serviceKeyboard(sid):
     session = sessions.get(sid)
     rows = []
     rows.append([
-        {"text": "禁用服务" if enabled else "启用服务", "callback_data": f"acm:disable:{sid}" if enabled else f"acm:enable:{sid}"},
-        {"text": "立即签到", "callback_data": f"acm:checkin:{sid}"},
+        {"text": "⏸ 禁用服务" if enabled else "✅ 启用服务", "callback_data": f"acm:disable:{sid}" if enabled else f"acm:enable:{sid}"},
+        {"text": "⚡ 立即签到", "callback_data": f"acm:checkin:{sid}"},
     ])
     if session:
         if session.get("status") == "pending_confirm":
             rows.append([
-                {"text": "确认保存", "callback_data": f"acm:login_save:{sid}"},
-                {"text": "重新提取", "callback_data": f"acm:login_done:{sid}"},
+                {"text": "✅ 确认保存", "callback_data": f"acm:login_save:{sid}"},
+                {"text": "🔄 重新提取", "callback_data": f"acm:login_done:{sid}"},
             ])
         else:
             rows.append([
-                {"text": "登录完成", "callback_data": f"acm:login_done:{sid}"},
-                {"text": "继续登录页", "callback_data": f"acm:login_continue:{sid}"},
+                {"text": "✅ 登录完成", "callback_data": f"acm:login_done:{sid}"},
+                {"text": "🌐 继续登录页", "callback_data": f"acm:login_continue:{sid}"},
             ])
-        rows.append([{"text": "取消登录会话", "callback_data": f"acm:login_cancel:{sid}"}])
+        rows.append([{"text": "✖️ 取消登录会话", "callback_data": f"acm:login_cancel:{sid}"}])
     elif svc.get("login_enabled") and svc.get("login_start_command"):
-        rows.append([{"text": "更新登录", "callback_data": f"acm:login:{sid}"}])
+        rows.append([{"text": "🌐 更新登录", "callback_data": f"acm:login:{sid}"}])
     rows.append([
-        {"text": "刷新", "callback_data": f"acm:service:{sid}"},
-        {"text": "返回服务列表", "callback_data": "acm:services"},
+        {"text": "🔄 刷新", "callback_data": f"acm:service:{sid}"},
+        {"text": "🧩 返回服务列表", "callback_data": "acm:services"},
     ])
-    rows.append([{"text": "主菜单", "callback_data": "acm:menu"}])
+    rows.append([{"text": "🏠 主菜单", "callback_data": "acm:menu"}])
     return rows
 
 
@@ -658,7 +685,6 @@ def _sendTelegramResult(result, callback=None):
                 except TelegramApiError as e:
                     if e.error_code == 400 and (
                         "message is not modified" in e.description.lower()
-                        or "message to edit not found" in e.description.lower()
                     ):
                         return
                 except Exception:
@@ -809,14 +835,14 @@ def startServiceLogin(sid):
         "message": result.get("message", ""),
     })
 
-    lines = [f"{svc.get('name', sid)} 登录会话已创建。"]
+    lines = [f"🌐 {_h(svc.get('name', sid))} 登录会话已创建。"]
     lines.append(f"Session：<code>{_h(session_id)}</code>")
     if result.get("message"):
         lines.append(_h(result["message"]))
     live_url = result.get("live_url") or result.get("url")
     if live_url:
         lines.append(f"\n打开链接完成登录：\n{_h(live_url)}")
-    lines.append("\n完成后点下面的“登录完成”。")
+    lines.append("\n完成后点下面的“✅ 登录完成”。")
     return _telegramResult("\n".join(lines), _serviceKeyboard(sid))
 
 
@@ -910,10 +936,10 @@ def continueServiceLogin(sid):
     live_url = session.get("live_url", "")
     if live_url:
         return _telegramResult(
-            f"Session：<code>{_h(session.get('session', ''))}</code>\n\n继续在这个页面完成登录：\n{_h(live_url)}\n\n完成后点“登录完成”。",
+            f"🧭 Session：<code>{_h(session.get('session', ''))}</code>\n\n🌐 继续在这个页面完成登录：\n{_h(live_url)}\n\n完成后点“✅ 登录完成”。",
             _serviceKeyboard(sid),
         )
-    return _telegramResult("当前登录会话没有可打开的 Live View 链接。", _serviceKeyboard(sid))
+    return _telegramResult("⚠️ 当前登录会话没有可打开的 Live View 链接。", _serviceKeyboard(sid))
 
 
 def cancelServiceLogin(sid):
@@ -946,24 +972,29 @@ def serviceStatusText(sid=None):
         key = svc.get("key", "")
         credential = account.get("config", {}).get(key, "") if key else ""
         lines = [
-            f"服务：{svc.get('name', sid)} ({sid})",
-            f"启用：{'是' if sid in account.get('services', []) else '否'}",
-            f"凭据字段：{key or '(无)'}",
-            f"凭据：{_mask(credential)}",
+            f"🧩 服务：{_h(svc.get('name', sid))} ({_h(sid)})",
+            f"{'✅' if sid in account.get('services', []) else '⏸'} 启用：{'是' if sid in account.get('services', []) else '否'}",
+            f"🔑 凭据字段：{_h(key or '(无)')}",
+            f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
         ]
         if sid in sessions:
-            lines.append("登录会话：进行中")
+            lines.append("🧭 登录会话：进行中")
         return "\n".join(lines)
 
     enabled = account.get("services", [])
-    lines = [f"账号：{account.get('name', '默认账号')}", "启用服务：" + (", ".join(enabled) if enabled else "(无)")]
+    lines = [
+        "📊 <b>账号状态</b>",
+        f"👤 账号：{_h(account.get('name', '默认账号'))}",
+        "✅ 启用服务：" + (_h(", ".join(enabled)) if enabled else "(无)"),
+    ]
     for item_sid in enabled:
         svc = services.get(item_sid, {})
         key = svc.get("key")
         if key:
-            lines.append(f"{item_sid} 凭据：{_mask(account.get('config', {}).get(key, ''))}")
+            credential = account.get("config", {}).get(key, "")
+            lines.append(f"{'🔐' if credential else '⚠️'} {_h(item_sid)} 凭据：{_h(_mask(credential) if credential else '未保存')}")
     if sessions:
-        lines.append("登录会话：" + ", ".join(sessions.keys()))
+        lines.append("🧭 登录会话：" + _h(", ".join(sessions.keys())))
     return "\n".join(lines)
 
 
@@ -989,7 +1020,7 @@ def handleTelegramCommand(text):
 
     if command == "/status":
         sid = parts[1] if len(parts) >= 2 else None
-        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _mainKeyboard())
+        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _statusKeyboard())
 
     if command in ("/enable", "/disable"):
         if len(parts) < 2:
@@ -1019,13 +1050,13 @@ def handleTelegramCommand(text):
         if sid not in account["services"]:
             account["services"].append(sid)
             saveAccount(account)
-        return _telegramResult(f"已更新 {services[sid].get('name', sid)} 的登录凭据，并启用该服务。", _serviceKeyboard(sid))
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
 
     if command == "/setkey":
         if len(parts) < 3:
             return "用法：/setkey <字段名> <凭据>"
         setCredential(parts[1], parts[2])
-        return _telegramResult(f"已更新字段 <code>{_h(parts[1])}</code>。", _mainKeyboard())
+        return _telegramResult(f"✅ 已更新字段 <code>{_h(parts[1])}</code>。", _mainKeyboard())
 
     if command == "/login":
         if len(parts) < 2:
@@ -1056,9 +1087,9 @@ def handleTelegramCommand(text):
             kwargs={"skip_wait_time": True, "only_service": only_service, "telegram_notice": True},
             daemon=True,
         ).start()
-        return _telegramResult("已开始执行签到，完成后会发送 Telegram 通知。", _serviceKeyboard(only_service) if only_service else _mainKeyboard())
+        return _telegramResult("⚡ 已开始执行签到，完成后会发送 Telegram 通知。", _serviceKeyboard(only_service) if only_service else _mainKeyboard())
 
-    return _telegramResult("未知命令。发送 /help 查看可用命令。", _mainKeyboard())
+    return _telegramResult("⚠️ 未知命令。发送 /help 回到主菜单。", _mainKeyboard())
 
 
 def handleTelegramCallback(data):
@@ -1068,7 +1099,7 @@ def handleTelegramCallback(data):
     action = parts[1]
     sid = parts[2] if len(parts) >= 3 else None
     if action == "status":
-        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _mainKeyboard())
+        return _telegramResult(_serviceText(sid) if sid else serviceStatusText(), _serviceKeyboard(sid) if sid else _statusKeyboard())
     if action == "menu":
         return _telegramResult(_mainMenuText(), _mainKeyboard())
     if action == "services":
@@ -1105,8 +1136,8 @@ def handleTelegramCallback(data):
             kwargs={"skip_wait_time": True, "only_service": sid, "telegram_notice": True},
             daemon=True,
         ).start()
-        return _telegramResult("已开始执行签到，完成后会发送 Telegram 通知。", _serviceKeyboard(sid) if sid else _mainKeyboard())
-    return _telegramResult("这个按钮动作暂不支持。", _mainKeyboard())
+        return _telegramResult("⚡ 已开始执行签到，完成后会发送 Telegram 通知。", _serviceKeyboard(sid) if sid else _mainKeyboard())
+    return _telegramResult("⚠️ 这个按钮动作暂不支持。", _mainKeyboard())
 
 
 _bot_thread = None
