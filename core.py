@@ -46,6 +46,7 @@ _EMPTY_DATA = {
         "config": {},
     },
     "login_sessions": {},
+    "telegram_pending": {},
     "last_checkin_time": 0,
 }
 
@@ -102,6 +103,7 @@ def _normalizeData(data):
     account.setdefault("services", [])
     account.setdefault("config", {})
     data.setdefault("login_sessions", {})
+    data.setdefault("telegram_pending", {})
 
     for service in data.get("services", {}).values():
         service.setdefault("login_start_command", "")
@@ -276,6 +278,16 @@ def loadLoginSessions():
 def saveLoginSessions(sessions):
     data = _loadData()
     data["login_sessions"] = sessions
+    _saveData(data)
+
+
+def loadTelegramPending():
+    return _loadData().get("telegram_pending", {})
+
+
+def saveTelegramPending(pending):
+    data = _loadData()
+    data["telegram_pending"] = pending
     _saveData(data)
 
 
@@ -550,6 +562,9 @@ def _mainKeyboard():
             {"text": "🧩 服务管理", "callback_data": "acm:services"},
             {"text": "📊 账号状态", "callback_data": "acm:status"},
         ],
+        [
+            {"text": "🔑 凭据管理", "callback_data": "acm:credentials"},
+        ],
     ]
 
 
@@ -557,20 +572,36 @@ def _statusKeyboard():
     return [
         [
             {"text": "🧩 服务管理", "callback_data": "acm:services"},
-            {"text": "🔄 刷新状态", "callback_data": "acm:status"},
+            {"text": "🔑 凭据管理", "callback_data": "acm:credentials"},
         ],
         [
+            {"text": "🔄 刷新状态", "callback_data": "acm:status"},
             {"text": "🏠 返回主菜单", "callback_data": "acm:menu"},
         ],
     ]
 
 
+def _serviceNeedsCredential(svc):
+    return bool(svc.get("key", "").strip())
+
+
+def _serviceCredential(svc, account):
+    key = svc.get("key", "").strip()
+    if not key:
+        return ""
+    return account.get("config", {}).get(key, "")
+
+
+def _credentialMark(svc, account):
+    if not _serviceNeedsCredential(svc):
+        return "➖"
+    return "🔐" if _serviceCredential(svc, account) else "⚠️"
+
+
 def _serviceListLabel(sid, svc, account, sessions):
     enabled = sid in account.get("services", [])
-    key = svc.get("key", "")
-    credential = account.get("config", {}).get(key, "") if key else ""
     status = "✅" if enabled else "⏸"
-    credential_mark = "🔐" if credential else "⚠️"
+    credential_mark = _credentialMark(svc, account)
     session_mark = " 🧭" if sid in sessions else ""
     return f"{status} {credential_mark} {svc.get('name', sid)}{session_mark}"
 
@@ -592,9 +623,63 @@ def _servicesText():
         return "🧩 <b>服务管理</b>\n\n当前没有配置服务，请先在 TUI 中添加服务。"
     return (
         "🧩 <b>服务管理</b>\n\n"
-        "✅ 启用　⏸ 禁用　🔐 已有凭据　⚠️ 缺少凭据　🧭 登录会话中\n\n"
+        "✅ 启用　⏸ 禁用　🔐 已有凭据　⚠️ 缺少凭据　➖ 无需凭据　🧭 登录会话中\n\n"
         "选择一个服务查看详情、启用/禁用、签到或更新登录。"
     )
+
+
+def _credentialsText():
+    account = loadAccount()
+    services = loadServices()
+    lines = ["🔑 <b>凭据管理</b>", ""]
+    editable = False
+    service_keys = set()
+    for sid, svc in services.items():
+        if not _serviceNeedsCredential(svc):
+            continue
+        service_keys.add(svc.get("key", ""))
+        editable = True
+        credential = _serviceCredential(svc, account)
+        lines.append(
+            f"{'🔐' if credential else '⚠️'} {_h(svc.get('name', sid))} "
+            f"(<code>{_h(svc.get('key', ''))}</code>)：{_h(_mask(credential) if credential else '未保存')}"
+        )
+    extra_keys = [key for key in sorted(account.get("config", {}).keys()) if key not in service_keys]
+    for key in extra_keys:
+        editable = True
+        credential = account.get("config", {}).get(key, "")
+        lines.append(f"🔑 <code>{_h(key)}</code>：{_h(_mask(credential) if credential else '未保存')}")
+    if not editable:
+        lines.append("当前没有需要手动维护凭据的服务。")
+    else:
+        lines.append("")
+        lines.append("选择服务后可以直接在 Bot 里发送新凭据保存。")
+    return "\n".join(lines)
+
+
+def _credentialsKeyboard():
+    services = loadServices()
+    account = loadAccount()
+    service_keys = set()
+    rows = []
+    for sid, svc in services.items():
+        if not _serviceNeedsCredential(svc):
+            continue
+        service_keys.add(svc.get("key", ""))
+        rows.append([{"text": f"✏️ 修改 {svc.get('name', sid)}", "callback_data": f"acm:credential:{sid}"}])
+    extra_keys = [key for key in sorted(account.get("config", {}).keys()) if key not in service_keys]
+    for index, key in enumerate(extra_keys):
+        rows.append([{"text": f"🔑 修改字段 {key}", "callback_data": f"acm:credential_key:{index}"}])
+    rows.append([{"text": "➕ 新增字段凭据", "callback_data": "acm:credential_new"}])
+    rows.append([{"text": "🧩 返回服务列表", "callback_data": "acm:services"}])
+    rows.append([{"text": "🏠 主菜单", "callback_data": "acm:menu"}])
+    return rows
+
+
+def _extraCredentialKeys():
+    account = loadAccount()
+    service_keys = {svc.get("key", "") for svc in loadServices().values() if _serviceNeedsCredential(svc)}
+    return [key for key in sorted(account.get("config", {}).keys()) if key not in service_keys]
 
 
 def _serviceText(sid):
@@ -605,17 +690,23 @@ def _serviceText(sid):
     if not svc:
         return f"服务 {_h(sid)} 不存在。"
     key = svc.get("key", "")
-    credential = account.get("config", {}).get(key, "") if key else ""
+    credential = _serviceCredential(svc, account)
+    needs_credential = _serviceNeedsCredential(svc)
     enabled = sid in account.get("services", [])
     login_ready = svc.get("login_enabled") and svc.get("login_start_command")
     lines = [
         f"🧩 <b>{_h(svc.get('name', sid))}</b>",
         f"🆔 ID：<code>{_h(sid)}</code>",
         f"{'✅' if enabled else '⏸'} 状态：{'已启用' if enabled else '已禁用'}",
-        f"🔑 凭据字段：<code>{_h(key or '(无)')}</code>",
-        f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
         f"{'🌐' if login_ready else '➖'} 远程登录：{'已配置' if login_ready else '未配置'}",
     ]
+    if needs_credential:
+        lines.extend([
+            f"🔑 凭据字段：<code>{_h(key)}</code>",
+            f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
+        ])
+    else:
+        lines.append("➖ 凭据：无需配置")
     session = sessions.get(sid)
     if session:
         lines.extend([
@@ -655,6 +746,8 @@ def _serviceKeyboard(sid):
         rows.append([{"text": "✖️ 取消登录会话", "callback_data": f"acm:login_cancel:{sid}"}])
     elif svc.get("login_enabled") and svc.get("login_start_command"):
         rows.append([{"text": "🌐 更新登录", "callback_data": f"acm:login:{sid}"}])
+    if _serviceNeedsCredential(svc):
+        rows.append([{"text": "✏️ 手动修改凭据", "callback_data": f"acm:credential:{sid}"}])
     rows.append([
         {"text": "🔄 刷新", "callback_data": f"acm:service:{sid}"},
         {"text": "🧩 返回服务列表", "callback_data": "acm:services"},
@@ -961,6 +1054,150 @@ def cancelServiceLogin(sid):
     return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
 
 
+def startCredentialEdit(sid, chat_id=None):
+    services = loadServices()
+    if sid not in services:
+        return _telegramResult(f"服务 {_h(sid)} 不存在。", _credentialsKeyboard())
+    svc = services[sid]
+    if not _serviceNeedsCredential(svc):
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
+    if chat_id:
+        pending = loadTelegramPending()
+        pending[str(chat_id)] = {
+            "action": "set_credential",
+            "service_id": sid,
+            "key": svc.get("key", ""),
+            "created_at": time.time(),
+        }
+        saveTelegramPending(pending)
+    credential = _serviceCredential(svc, loadAccount())
+    text = (
+        f"✏️ <b>修改 {_h(svc.get('name', sid))} 凭据</b>\n\n"
+        f"字段：<code>{_h(svc.get('key', ''))}</code>\n"
+        f"当前：{_h(_mask(credential) if credential else '未保存')}\n\n"
+        "请直接发送新的凭据内容。发送 /cancel 可以取消。"
+    )
+    return _telegramResult(text, [
+        [{"text": "✖️ 取消修改", "callback_data": "acm:pending_cancel"}],
+        [{"text": "🧩 返回服务", "callback_data": f"acm:service:{sid}"}],
+    ])
+
+
+def startCredentialKeyEdit(index, chat_id=None):
+    keys = _extraCredentialKeys()
+    try:
+        key = keys[int(index)]
+    except (ValueError, IndexError):
+        return _telegramResult("⚠️ 字段不存在。", _credentialsKeyboard())
+    if chat_id:
+        pending = loadTelegramPending()
+        pending[str(chat_id)] = {
+            "action": "set_credential",
+            "service_id": "",
+            "key": key,
+            "created_at": time.time(),
+        }
+        saveTelegramPending(pending)
+    credential = loadAccount().get("config", {}).get(key, "")
+    text = (
+        "✏️ <b>修改凭据字段</b>\n\n"
+        f"字段：<code>{_h(key)}</code>\n"
+        f"当前：{_h(_mask(credential) if credential else '未保存')}\n\n"
+        "请直接发送新的凭据内容。发送 /cancel 可以取消。"
+    )
+    return _telegramResult(text, [
+        [{"text": "✖️ 取消修改", "callback_data": "acm:pending_cancel"}],
+        [{"text": "🔑 返回凭据管理", "callback_data": "acm:credentials"}],
+    ])
+
+
+def startCredentialNew(chat_id=None):
+    if chat_id:
+        pending = loadTelegramPending()
+        pending[str(chat_id)] = {
+            "action": "set_credential_pair",
+            "created_at": time.time(),
+        }
+        saveTelegramPending(pending)
+    text = (
+        "➕ <b>新增字段凭据</b>\n\n"
+        "请直接发送：\n"
+        "<code>字段名=凭据内容</code>\n\n"
+        "也可以把字段名单独放第一行，凭据内容从第二行开始。发送 /cancel 可以取消。"
+    )
+    return _telegramResult(text, [
+        [{"text": "✖️ 取消新增", "callback_data": "acm:pending_cancel"}],
+        [{"text": "🔑 返回凭据管理", "callback_data": "acm:credentials"}],
+    ])
+
+
+def _parseCredentialPair(text):
+    raw = text.strip()
+    if "=" in raw:
+        key, value = raw.split("=", 1)
+    elif "\n" in raw:
+        key, value = raw.split("\n", 1)
+    else:
+        return "", ""
+    return key.strip(), value.strip()
+
+
+def cancelTelegramPending(chat_id):
+    pending = loadTelegramPending()
+    if str(chat_id) in pending:
+        del pending[str(chat_id)]
+        saveTelegramPending(pending)
+    return _telegramResult("✖️ 已取消当前输入。", _mainKeyboard())
+
+
+def handleTelegramPendingInput(chat_id, text):
+    pending = loadTelegramPending()
+    item = pending.get(str(chat_id))
+    if not item:
+        return None
+    if text.strip().lower() == "/cancel":
+        return cancelTelegramPending(chat_id)
+    if item.get("action") == "set_credential_pair":
+        key, value = _parseCredentialPair(text)
+        if not key or not value:
+            return _telegramResult(
+                "⚠️ 格式不对，请发送 <code>字段名=凭据内容</code>，或发送 /cancel 取消。",
+                [[{"text": "✖️ 取消新增", "callback_data": "acm:pending_cancel"}]],
+            )
+        setCredential(key, value)
+        pending = loadTelegramPending()
+        pending.pop(str(chat_id), None)
+        saveTelegramPending(pending)
+        return _telegramResult(_credentialsText(), _credentialsKeyboard())
+    if item.get("action") != "set_credential":
+        del pending[str(chat_id)]
+        saveTelegramPending(pending)
+        return _telegramResult("⚠️ 未知的输入状态，已取消。", _mainKeyboard())
+    sid = item.get("service_id", "")
+    key = item.get("key", "")
+    services = loadServices()
+    if sid and sid not in services:
+        del pending[str(chat_id)]
+        saveTelegramPending(pending)
+        return _telegramResult("⚠️ 服务不存在，已取消。", _credentialsKeyboard())
+    if not key:
+        del pending[str(chat_id)]
+        saveTelegramPending(pending)
+        return _telegramResult("⚠️ 字段不存在，已取消。", _credentialsKeyboard())
+    setCredential(key, text)
+    if sid:
+        account = loadAccount()
+        if sid not in account["services"]:
+            account["services"].append(sid)
+            saveAccount(account)
+    pending = loadTelegramPending()
+    pending.pop(str(chat_id), None)
+    saveTelegramPending(pending)
+    if sid:
+        return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
+    return _telegramResult(_credentialsText(), _credentialsKeyboard())
+
+
 def serviceStatusText(sid=None):
     account = loadAccount()
     services = loadServices()
@@ -970,13 +1207,19 @@ def serviceStatusText(sid=None):
         if not svc:
             return f"服务 {sid} 不存在。"
         key = svc.get("key", "")
-        credential = account.get("config", {}).get(key, "") if key else ""
+        credential = _serviceCredential(svc, account)
+        needs_credential = _serviceNeedsCredential(svc)
         lines = [
             f"🧩 服务：{_h(svc.get('name', sid))} ({_h(sid)})",
             f"{'✅' if sid in account.get('services', []) else '⏸'} 启用：{'是' if sid in account.get('services', []) else '否'}",
-            f"🔑 凭据字段：{_h(key or '(无)')}",
-            f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
         ]
+        if needs_credential:
+            lines.extend([
+                f"🔑 凭据字段：{_h(key)}",
+                f"{'🔐' if credential else '⚠️'} 凭据：{_h(_mask(credential) if credential else '未保存')}",
+            ])
+        else:
+            lines.append("➖ 凭据：无需配置")
         if sid in sessions:
             lines.append("🧭 登录会话：进行中")
         return "\n".join(lines)
@@ -989,10 +1232,11 @@ def serviceStatusText(sid=None):
     ]
     for item_sid in enabled:
         svc = services.get(item_sid, {})
-        key = svc.get("key")
-        if key:
-            credential = account.get("config", {}).get(key, "")
+        if _serviceNeedsCredential(svc):
+            credential = _serviceCredential(svc, account)
             lines.append(f"{'🔐' if credential else '⚠️'} {_h(item_sid)} 凭据：{_h(_mask(credential) if credential else '未保存')}")
+        else:
+            lines.append(f"➖ {_h(item_sid)} 凭据：无需配置")
     if sessions:
         lines.append("🧭 登录会话：" + _h(", ".join(sessions.keys())))
     return "\n".join(lines)
@@ -1092,7 +1336,7 @@ def handleTelegramCommand(text):
     return _telegramResult("⚠️ 未知命令。发送 /help 回到主菜单。", _mainKeyboard())
 
 
-def handleTelegramCallback(data):
+def handleTelegramCallback(data, chat_id=None):
     parts = data.split(":")
     if len(parts) < 2 or parts[0] != "acm":
         return None
@@ -1104,6 +1348,16 @@ def handleTelegramCallback(data):
         return _telegramResult(_mainMenuText(), _mainKeyboard())
     if action == "services":
         return _telegramResult(_servicesText(), _servicesKeyboard())
+    if action == "credentials":
+        return _telegramResult(_credentialsText(), _credentialsKeyboard())
+    if action == "credential" and sid:
+        return startCredentialEdit(sid, chat_id)
+    if action == "credential_key" and sid is not None:
+        return startCredentialKeyEdit(sid, chat_id)
+    if action == "credential_new":
+        return startCredentialNew(chat_id)
+    if action == "pending_cancel":
+        return cancelTelegramPending(chat_id) if chat_id else _telegramResult("✖️ 已取消当前输入。", _mainKeyboard())
     if action == "service" and sid:
         return _telegramResult(_serviceText(sid), _serviceKeyboard(sid))
     if action in ("enable", "disable") and sid:
@@ -1190,7 +1444,7 @@ def _telegramBotLoop(log_callback=None):
                     if allowed_chat_id and chat_id != allowed_chat_id:
                         continue
                     answerTelegramCallback(callback.get("id", ""), "处理中")
-                    reply = handleTelegramCallback(callback.get("data", ""))
+                    reply = handleTelegramCallback(callback.get("data", ""), chat_id=chat_id)
                     _sendTelegramResult(reply, callback=callback)
                     continue
                 message = update.get("message") or update.get("edited_message") or {}
@@ -1200,6 +1454,10 @@ def _telegramBotLoop(log_callback=None):
                 if allowed_chat_id and chat_id != allowed_chat_id:
                     continue
                 text = message.get("text", "")
+                pending_reply = handleTelegramPendingInput(chat_id, text) if text else None
+                if pending_reply:
+                    _sendTelegramResult(pending_reply)
+                    continue
                 if not text.startswith("/"):
                     continue
                 reply = handleTelegramCommand(text)
